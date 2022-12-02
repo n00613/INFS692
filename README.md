@@ -1,2 +1,2 @@
 # INFS692
-STAT 325
+Hello World! This repo was made for the purpose of STAT 325

@@ -1,0 +1,192 @@
+---
+title: "MODEL - 3"
+author: "Freddy A. Julkanain II"
+output: pdf_document 
+---
+
+# Helper Packages And Modeling Packages
+```{r}
+library(dplyr)    
+library(ggplot2)   
+library(stringr)  
+library(cluster)    
+library(factoextra)
+library(gridExtra)  
+library(tidyverse)
+library(readr)
+library(mclust)
+```
+
+## Load the dataset
+#Note that the data we used here is from the output of Reprocessing Rawdata
+```{r}
+DF = read_csv("CleanedDF.csv")
+
+```
+
+# Scaling/Standardizing the Data
+```{r}
+df = scale(DF[c(3:431)])
+
+```
+#QUESTION: Compare the following clustering technique results:
+# 1. K-means
+# 2. Hierarchical 
+# 3. Model Based
+
+
+#------------------------------------ K-MEANS CLUSTERING ------------------------------------------#
+```{r}
+kmeans(df, centers = 3, iter.max = 100, nstart = 100)
+clusters = kmeans(df, centers = 3, iter.max = 100, nstart = 100)
+```
+
+
+# determine and visualize optimal number of clusters
+```{r}
+fviz_nbclust(df, kmeans, method = "wss") 
+fviz_nbclust(df, kmeans, method = "silhouette")
+fviz_nbclust(df, kmeans, method = "gap_stat") 
+
+clusters = kmeans(df, centers = 2, iter.max = 100, nstart = 100)
+fviz_cluster(kmeans(df, centers = 2, iter.max = 100, nstart = 100), data = df)
+```
+
+
+#The quality of a k-means partition. The quality of the partition is
+```{r}
+clusters$betweenss / clusters$totss
+```
+
+
+# visualize clusters using original variables
+```{r}
+clusters = kmeans(df, centers = 3, iter.max = 100, nstart = 100)
+DF = DF |> mutate(cluster = clusters$cluster)
+DF |> ggplot(aes(x = Failure, y = Entropy_cooc.W.ADC, col = as.factor(cluster))) + geom_point()
+```
+
+# 2.Heirarchical Clustering
+```{r}
+FPD = DF%>%
+  select_if(is.numeric) %>%  # select numeric columns
+  select(-Failure.binary) %>%    # remove target column
+  mutate_all(as.double) %>%  # coerce to double type
+  scale()
+data = dist(FPD, method = "euclidean")
+
+```
+
+# Hierarchical clustering using Complete Linkage
+```{r}
+hc1 = hclust(data, method = "complete")
+plot(hc1, cex = 0.6)
+rect.hclust(hc1, k = 2, border = 1:4)
+```
+#AGNES
+```{r}
+set.seed(123)
+hc2 = agnes(FPD, method = "complete")
+hc2$ac
+```
+#DIANA
+```{r}
+hc4 = diana(FPD)
+hc4$dc
+
+p1 = fviz_nbclust(FPD, FUN = hcut, method = "wss", 
+                   k.max = 10) +
+  ggtitle("(A) Elbow method")
+p2 = fviz_nbclust(FPD, FUN = hcut, method = "silhouette", 
+                   k.max = 10) +
+  ggtitle("(B) Silhouette method")
+p3 = fviz_nbclust(FPD, FUN = hcut, method = "gap_stat", 
+                   k.max = 10) +
+  ggtitle("(C) Gap statistic")
+gridExtra::grid.arrange(p1, p2, p3, nrow = 1)
+```
+# Ward's method
+```{r}
+hc5 = hclust(data, method = "ward.D2" )
+sub_grp = cutree(hc5, k = 8)
+table(sub_grp)
+```
+
+
+
+
+# 3.Model Based
+```{r}
+mod3 = Mclust(df[,1:10], G=3) 
+summary(mod3)
+mod4 = Mclust(df, 1:9) #from sir lecture 
+
+#Error in plot.new() : figure margins too large
+summary(mod4)
+
+```
+# Plot results
+```{r}
+plot(mod3, what = "density") #cannot plot 1:428 #dugay pag 1:10
+plot(mod3, what = "uncertainty")
+```
+
+
+```{r}
+legend_args = list(x = "bottomright", ncol = 5)
+plot(mod3, what = 'BIC', legendArgs = legend_args)
+plot(mod3, what = 'classification')
+plot(mod3, what = 'uncertainty')
+```
+
+
+```{r}
+probabilities = mod3$z 
+colnames(probabilities) = paste0('C', 1:3)
+
+probabilities = probabilities %>%
+  as.data.frame() %>%
+  mutate(id = row_number()) %>%
+  tidyr::gather(cluster, probability, -id)
+
+ggplot(probabilities, aes(probability)) +
+  geom_histogram() +
+  facet_wrap(~ cluster, nrow = 2)
+```
+
+
+```{r}
+uncertainty = data.frame(
+  id = 1:nrow(df),
+  cluster = mod3$classification,
+  uncertainty = mod3$uncertainty
+)
+uncertainty %>%
+  group_by(cluster) %>%
+  filter(uncertainty > 0.25) %>%
+  ggplot(aes(uncertainty, reorder(id, uncertainty))) +
+  geom_point() +
+  facet_wrap(~ cluster, scales = 'free_y', nrow = 1)
+```
+
+
+
+```{r}
+cluster2 = df %>%
+  scale() %>%
+  as.data.frame() %>%
+  mutate(cluster = mod3$classification) %>%
+  filter(cluster == 2) %>%
+  select(-cluster)
+
+cluster2 %>%
+  tidyr::gather(product, std_count) %>%
+  group_by(product) %>%
+  summarize(avg = mean(std_count)) %>%
+  ggplot(aes(avg, reorder(product, avg))) +
+  geom_point() +
+  labs(x = "Average standardized consumption", y = NULL)
+```
+
+
+

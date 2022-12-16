@@ -1,0 +1,99 @@
+---
+title: "Model 2"
+output: pdf_document
+author: "Freddy A. Julkanain II"
+---
+# Helper Packages AND  Model Packages
+```{r}
+library(dplyr)
+library(keras)
+library(tfruns) 
+library(rsample) 
+library(tfestimators) 
+library(readr)
+```
+
+# Load the dataset
+note that the data *normalRad.csv* is the output of our data reprocessing.
+
+```{r}
+df=read_csv("CleanedDF.csv")
+```
+
+
+# Split the data into training (70) and testing (30). 
+```{r}
+df=df %>%
+  mutate(Failure.binary=ifelse(Failure.binary== "No",0,1))
+
+set.seed(123)
+split = initial_split(df,prop = 0.8 ,strata = "Failure.binary")
+churn_train = training(split)
+churn_test  = testing(split)
+
+#or 
+
+X_train = churn_train[,-c(1,2)]%>%as.matrix.data.frame()
+X_test = churn_test[,-c(1,2)]%>%as.matrix.data.frame()
+y_train = churn_train$Failure.binary
+y_test = churn_test$Failure.binary
+```
+
+#reshaping the dataset
+```{r}
+X_train = array_reshape(X_train, c(nrow(X_train), ncol(X_train)))
+X_train = X_train 
+
+X_test = array_reshape(X_test, c(nrow(X_test), ncol(X_test)))
+X_test = X_test 
+
+y_train = to_categorical(y_train, num_classes = 2)
+y_test = to_categorical(y_test, num_classes = 2)
+
+model = keras_model_sequential() %>%
+  layer_dense(units = 256, activation = "sigmoid", input_shape = c(ncol(X_train))) %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 128, activation = "sigmoid") %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 128, activation = "sigmoid") %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 64, activation = "sigmoid") %>% 
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 64, activation = "sigmoid") %>% 
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 2, activation = "softmax")
+```
+
+# Backpropagation
+```{r, eval=FALSE}
+ compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_rmsprop(),
+    metrics = c("accuracy")
+  )
+```
+
+# Compile the Model
+```{r}
+ model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_adam(),
+  metrics = c("accuracy")
+)
+
+history = model %>% 
+  fit(X_train, y_train, epochs = 10, batch_size = 128, validation_split = 0.15)
+```
+
+#Evaluate the trained model 
+```{r}
+model %>%
+  evaluate(X_test, y_test)
+dim(X_test)
+dim(y_test)
+```
+
+#model prediction
+```{r}
+model   %>% predict(X_test) %>% `>`(0.8) %>% k_cast("int32")
+```

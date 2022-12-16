@@ -1,0 +1,150 @@
+---
+title: "Model 1 - SVM"
+author: "Freddy A. Julkanain II"
+output: pdf_document
+---
+
+```{r}
+pacman::p_load(
+  pacman,
+  tidyverse,
+  rsample,
+  caret,
+  kernlab,
+  modeldata,
+  pdp,
+  vip,
+  ROCR,
+  pROC
+)
+```
+
+```{r}
+# DATA
+DF= read.csv("CleanedDF.csv")
+```
+
+```{r}
+# Load Failure.binary data
+
+DF$Failure.binary=as.factor(DF$Failure.binary)
+
+set.seed(123)  # for reproducibility
+indexing = initial_split(DF, prop = 0.8, strata = "Failure.binary")
+split_train = training(indexing)
+split_test  = testing(indexing)
+```
+
+
+```{r}
+# Linear (i.e., soft margin classifier)
+caret::getModelInfo("svmLinear")$svmLinear$parameters
+
+# Polynomial kernel
+caret::getModelInfo("svmPoly")$svmPoly$parameters
+
+# Radial basis kernel
+caret::getModelInfo("svmRadial")$svmRadial$parameters
+```
+
+### Run SVM Model in Training phase
+
+Using **split_train**, we can tune an SVM model with radial basis kernel.
+
+```{r}
+set.seed(1854)  # for reproducibility
+split_svm = train(
+  Failure.binary ~ ., 
+  data = split_train,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+```
+
+Plot and print SVM model with with radial basis kernel.
+
+```{r}
+# Plot results
+ggplot(split_svm) + theme_light()
+
+# Print results
+split_svm$results
+```
+
+Control parameter
+
+```{r}
+class.weights = c("No" = 1, "Yes" = 10)
+
+# Control params for SVM
+ctrl = trainControl(
+  method = "cv", 
+  number = 10, 
+  classProbs = TRUE,                 
+  summaryFunction = twoClassSummary  # also needed for AUC/ROC
+)
+
+split_train$Failure.binary=fct_recode(split_train$Failure.binary,No="0",Yes="1")
+
+```
+
+### Print the AUC values during Training
+
+```{r}
+# Tune an SVM
+set.seed(5628)  # for reproducibility
+train_svm_auc = train(
+  Failure.binary ~ ., 
+  data = split_train,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",  # area under ROC curve (AUC)       
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+# Print results
+train_svm_auc$results
+confusionMatrix(train_svm_auc)
+```
+
+### Print the Top 20 important features during Training
+
+```{r}
+prob_yes = function(object, newdata) {
+  predict(object, newdata = newdata, type = "prob")[, "Yes"]
+}
+
+# Variable importance plot
+set.seed(2827)  # for reproducibility
+vip(train_svm_auc, method = "permute", nsim = 5, train = split_train, 
+    target = "Failure.binary", metric = "auc", reference_class = "Yes", 
+    pred_wrapper = prob_yes,num_features = 20)
+```
+
+
+
+
+### Print the AUC values during Testing
+
+```{r}
+split_test$Failure.binary=fct_recode(split_test$Failure.binary,No="0",Yes="1")
+
+# Tune an SVM with radial 
+set.seed(5628)  # for reproducibility
+test_svm_auc = train(
+  Failure.binary ~ ., 
+  data = split_test,
+  method = "svmRadial",               
+  preProcess = c("center", "scale"),  
+  metric = "ROC",  # area under ROC curve (AUC)       
+  trControl = ctrl,
+  tuneLength = 10
+)
+
+# Print results
+test_svm_auc$results
+confusionMatrix(test_svm_auc)
+```

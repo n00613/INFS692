@@ -1,0 +1,79 @@
+---
+title: "Data Preprocessing"
+author: "Freddy A. Julkanain II"
+output: pdf_document
+---
+Tidy will be mainly use for wrangling, bestNormalize for effective data transformation, and MASS package for some basic statistical graphs, test, and manipulations.
+```{r}
+pacman::p_load(
+  tidyverse,
+  bestNormalize,
+  MASS
+  )
+```
+
+Loading the given raw data into the environment.
+```{r}
+DF=read_csv("radiomics_completedata.csv")
+```
+
+Simple check for any missing value
+```{r}
+sum(is.na(DF))
+```
+
+Isolating numeric columns, removing the target classification variable and applying kolmogorov-smirnov test for normality to each column since shapiro test performs badly for n<50.
+```{r,warning=F}
+DF1=DF%>%select_if(is.numeric)
+DF1=DF1[,-1]
+DF2=apply(DF1,2,function(x){ks.test(x,"pnorm")})
+```
+Exttacting pvalue from test results via lapply and converting result to an atomic vector for easier manipuation
+```{r}
+KS_list=unlist(lapply(DF2, function(x) x$p.value))
+```
+
+Using the p-value vector, well create a simple table indicating number of columns that would be considered nonnormal using 0.05 as region of rejection.
+```{r}
+nonnormal=sum(KS_list<0.05)
+Normal=sum(KS_list>=0.05)
+ColNumber=ncol(DF1)
+cbind(ColNumber,nonnormal,Normal)
+```
+
+
+We will now apply the orderNorm transformation fuction from bestNormalize fuction which does an Ordinary Quantile Normalization which is a very strong normalization technique. The result of the transformation is extracted namely x.t and then collected to a dataframe right before again applying the normality test algorithm previously 
+```{r,warning=F}
+tmpDF=DF[,c(3:length(names(DF)))]%>%
+  apply(2,orderNorm)%>%
+  lapply( function(x) x$x.t)%>%
+  as.data.frame()
+KS_list=apply(tmpDF,2,function(x){ks.test(x,"pnorm")})
+KS_list=unlist(lapply(KS_list, function(x) x$p.value))
+```
+Redoing the table for column normality check we see that all nonnormal columns are transformed into nonnormal data.
+```{r,warning=F}
+nonnormal=sum(KS_list<0.05)
+Normal=sum(KS_list>=0.05)
+ColNumber=ncol(DF1)
+cbind(ColNumber,nonnormal,Normal)
+```
+The transformation results are loaded back into the main dataframe in the environment
+```{r}
+DF[,c(3:length(names(DF)))]=tmpDF
+```
+
+A basic correlation heatmap is generated( excluding the first two columns that are categorical). It is technically too compressed due to the size of the data
+```{r}
+CorMatrix=cor(DF[,-c(1,2)])
+heatmap(CorMatrix,Rowv=NA,Colv=NA,scale="none",revC = T)
+```
+
+Lastly, the data is written into a CSV file for easier access of following model buildings.
+```{r}
+write.csv(DF,"CleanedDF.csv")
+```
+
+
+
+

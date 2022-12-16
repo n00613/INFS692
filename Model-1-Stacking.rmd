@@ -1,0 +1,271 @@
+---
+title: "Model 1 - Stacking"
+output: pdf_document
+---
+
+Basic packages will be loaded to help with package loading, splitting the data into test and training set, the use of h2o to utilize java in the machine learning method and finaly with performance checks with the use or ROCR and and pROC
+```{r,warning=F}
+# Helper packages
+pacman::p_load(
+  pacman,
+  rsample,
+  recipes,
+  tidyverse,
+  readr,
+  h2o,
+  ROCR,
+  pROC
+               )
+```
+
+We will have to initiallize the h2o connection, allow permission incase a pop-up appears for Java. Also may require the user to run h2o.removeAll() to clear h2o environment incase of h2o errors.
+```{r,warning=F}
+h2o.init()
+```
+
+Loading data, factoring target variable for classification and splittign data based on the classifier as strata into training and testing set.
+```{r,warning=F}
+set.seed(123)  # for reproducibility
+DF= read_csv("CleanedDF.csv")
+DF$Failure.binary=DF$Failure.binary%>%as.factor()
+split = DF%>%initial_split( strata = "Failure.binary")
+trn_df = training(split)
+tst_df = testing(split)
+```
+
+Creating a blueprint of the model for the training and testing set converted into h2o objects since we will use h2o for modelling.
+```{r,warning=F}
+# Make sure we have consistent categorical levels
+blueprint = recipe(Failure.binary ~ ., data = trn_df) %>%
+  step_other(all_nominal(), threshold = 0.005)
+
+# Create training & test sets for h2o
+trn_h2o = prep(blueprint, training = trn_df, retain = TRUE) %>%
+  juice() %>%
+  as.h2o()
+tst_h2o = prep(blueprint, training = trn_df) %>%
+  bake(new_data = tst_df) %>%
+  as.h2o()
+
+
+```
+Extracting response and feature names for easy access
+```{r,warning=F}
+# Get response and feature names
+Y = "Failure.binary"
+
+X = setdiff(names(trn_df), Y)
+
+```
+Training best candidate glm model for ensemble
+```{r,warning=F}
+best_glm = h2o.glm(
+  x = X, y = Y, training_frame = trn_h2o, alpha = 0.1,
+  remove_collinear_columns = TRUE, nfolds = 10, fold_assignment = "Modulo",stopping_metric = "logloss",
+  keep_cross_validation_predictions = TRUE, seed = 123
+)
+```
+Training best candidate rf model for ensemble
+```{r,warning=F}
+
+best_rf = h2o.randomForest(
+  x = X, y = Y, training_frame = trn_h2o, ntrees = 100, mtries = 20,
+  max_depth = 30, min_rows = 1, sample_rate = 0.8, nfolds = 10,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "logloss",
+  stopping_tolerance = 0
+)
+```
+Training best candidate glm model for ensemble
+```{r,warning=F}
+# Train & cross-validate a GBM model
+best_gbm = h2o.gbm(
+  x = X, y = Y, training_frame = trn_h2o, ntrees = 100, learn_rate = 0.01,
+  max_depth = 7, min_rows = 5, sample_rate = 0.8, nfolds = 10,
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123, stopping_rounds = 50, stopping_metric = "logloss",
+  stopping_tolerance = 0
+)
+```
+Getting logloss of each candidate model using custom function, and it seems glm had the largest logloss while gbm had the smallest. this makes gbm a good candidate for stacked ensemble
+```{r,warning=F}
+get_logloss = function(model) {
+  results = h2o.performance(model, newdata = tst_h2o)
+  results@metrics$logloss
+}
+list(best_glm, best_rf, best_gbm) %>%
+  purrr::map_dbl(get_logloss)
+## [1] 30024.67 23075.24 20859.92 21391.20
+```
+Defining a hyper parameter tuning gread and the search criteria for the stacked ensemble algorithm
+```{r,warning=F}
+# Define GBM hyperparameter grid
+hyper_grid = list(
+  max_depth = c(1, 3, 5),
+  min_rows = c(1, 5, 10),
+  learn_rate = c(0.01, 0.05, 0.1),
+  learn_rate_annealing = c(0.99, 1),
+  sample_rate = c(0.5, 0.75, 1),
+  col_sample_rate = c(0.8, 0.9, 1)
+)
+
+# Define random grid search criteria
+search_criteria = list(
+  strategy = "RandomDiscrete",
+  max_models = 25
+)
+```
+creaing the grid in h2o
+```{r,warning=F}
+# Build random grid search 
+random_grid = h2o.grid(
+  algorithm = "gbm", grid_id = "gbm_grid", x = X, y = Y,
+  training_frame = trn_h2o, hyper_params = hyper_grid,
+  search_criteria = search_criteria, ntrees = 20, stopping_metric = "logloss",     
+  stopping_rounds = 10, stopping_tolerance = 0, nfolds = 10, 
+  fold_assignment = "Modulo", keep_cross_validation_predictions = TRUE,
+  seed = 123
+)
+```
+now creating the stacked ensemble with the gbm as base model
+```{r,warning=F}
+ensemble_tree = h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = trn_h2o, model_id = "ensemble_gbm_grid",
+  base_models = random_grid@model_ids, metalearner_algorithm = "gbm",
+)
+```
+
+
+```{r,warning=F}
+# Stacked results
+h2o.performance(ensemble_tree, newdata = tst_h2o)@metrics$logloss
+## [1] 20664.56
+
+data.frame(
+  GLM_pred = as.vector(h2o.getFrame(best_glm@model$cross_validation_holdout_predictions_frame_id$name))%>%as.numeric(),
+  RF_pred = as.vector(h2o.getFrame(best_rf@model$cross_validation_holdout_predictions_frame_id$name))%>%as.numeric(),
+  GBM_pred = as.vector(h2o.getFrame(best_gbm@model$cross_validation_holdout_predictions_frame_id$name))%>%as.numeric()
+) %>% cor()
+```
+
+We will now sort the stacking result by their corresponding logloss.
+```{r,warning=F}
+h2o.getGrid(
+  grid_id = "gbm_grid", 
+  sort_by = "logloss"
+)
+```
+Retreiving the sorted grid.
+```{r,warning=F}
+random_grid_perf = h2o.getGrid(
+  grid_id = "gbm_grid", 
+  sort_by = "logloss"
+)
+```
+```{r}
+
+```
+
+Retrieving the best model from the grid and checking its perfomrmance on testing data.
+```{r,warning=F}
+# Grab the model_id for the top model, chosen by validation error
+best_model_id = random_grid_perf@model_ids[[1]]
+best_model = h2o.getModel(best_model_id)
+h2o.performance(best_model, newdata = tst_h2o)
+```
+
+Best model is finally stacked.
+```{r,warning=F}
+# Train a stacked ensemble using the GBM grid
+ensemble = h2o.stackedEnsemble(
+  x = X, y = Y, training_frame = trn_h2o, model_id = "ensemble_gbm_grid",
+  base_models = random_grid@model_ids, metalearner_algorithm = "gbm"
+)
+```
+
+And its prediction performance on test data is:
+```{r,warning=F}
+# Eval ensemble performance on a test set
+h2o.performance(ensemble, newdata = tst_h2o)
+```
+
+```{r}
+h2o.performance(ensemble)
+```
+
+To further validate the model, we will do an AutoML and be able to see how the stacked ensemble performs well overall
+```{r,warning=F}
+# Use AutoML to find a list of candidate models (i.e., leaderboard)
+auto_ml = h2o.automl(
+  x = X, y = Y, training_frame = trn_h2o, nfolds = 5, 
+  max_runtime_secs = 60 * 120, max_models = 10,#max_models=50
+  keep_cross_validation_predictions = TRUE, sort_metric = "logloss", seed = 123,
+  stopping_rounds = 10, stopping_metric = "logloss", stopping_tolerance = 0
+)
+```
+
+The resulting list of best models are then sorted by logloss
+
+```{r,warning=F}
+# Assess the leader board; the following truncates the results to show the top 
+# and bottom 15 models. You can get the top model with auto_ml@leader
+auto_ml@leaderboard %>% 
+  as.data.frame() %>%
+  dplyr::select(model_id, logloss) %>%
+  dplyr::slice(1:25)
+
+```
+Now testing the stacked best mode's prediction performane on training data which again shows strong accuracy.
+
+```{r,warning=F}
+# Compute predicted probabilities on training data
+trn_h2o=as.h2o(trn_df)
+m1_prob = predict(auto_ml@leader, trn_h2o, type = "prob")
+m1_prob=as.data.frame(m1_prob)[,1]%>%as.numeric()
+trn_h2o=as.data.frame(trn_h2o)
+# Compute AUC metrics for cv_model1,2 and 3 
+perf1 = prediction(m1_prob,trn_h2o$Failure.binary) %>%
+  performance(measure = "tpr", x.measure = "fpr")
+# Plot ROC curves for cv_model1,2 and 3 
+plot(perf1, col = "black", lty = 2)
+```
+
+Strong accuracy is dpicted by the high AUC value.
+```{r,warning=F}
+# ROC plot for training data
+roc( trn_h2o$Failure.binary ~ m1_prob, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+```
+
+The model performed well on the testing data as well so it is not considerably an overfitted model
+```{r,warning=F}
+# Compute predicted probabilities on training data
+tst_h2o=as.h2o(tst_df)
+m2_prob = predict(auto_ml@leader, tst_h2o, type = "prob")
+m2_prob=as.data.frame(m2_prob)[,1]%>%as.numeric()
+tst_h2o=as.data.frame(tst_h2o)
+
+# Compute AUC metrics for cv_model1,2 and 3 
+perf2 = prediction(m2_prob,tst_h2o$Failure.binary) %>%
+  performance(measure = "tpr", x.measure = "fpr")
+
+
+# Plot ROC curves for cv_model1,2 and 3 
+plot(perf2, col = "black", lty = 2)
+```
+
+The AUC shown below is high enough to provide a good prediction.
+```{r,warning=F}
+# ROC plot for training data
+roc( tst_h2o$Failure.binary ~ m2_prob, plot=TRUE, legacy.axes=FALSE, 
+    percent=TRUE, col="black", lwd=2, print.auc=TRUE)
+
+```
+The Entropy is again the ighest interms of the variable importance but this time interms of permutatino importance since vip does not exist for stacked models.
+```{r,warning=F}
+tst_h2o=as.h2o(tst_h2o)
+h2o.permutation_importance_plot(auto_ml@leader,tst_h2o,num_of_features = 20)
+```
+
+
+
